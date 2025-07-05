@@ -13,15 +13,56 @@ import re
 import io
 
 
+def extract_word_formatting(paragraph):
+    """
+    从Word段落中提取详细的格式信息，包括每个文本片段的颜色
+    """
+    formatting_data = []
+    
+    for run in paragraph.runs:
+        run_format = {
+            'text': run.text,
+            'font_name': None,
+            'font_size': None,
+            'font_bold': None,
+            'font_italic': None,
+            'font_underline': None,
+            'font_color': None
+        }
+        
+        if hasattr(run, 'font'):
+            font = run.font
+            run_format['font_name'] = font.name
+            run_format['font_size'] = font.size
+            run_format['font_bold'] = font.bold
+            run_format['font_italic'] = font.italic
+            run_format['font_underline'] = font.underline
+            
+            # 提取颜色信息
+            try:
+                if hasattr(font, 'color') and font.color:
+                    if hasattr(font.color, 'rgb') and font.color.rgb:
+                        run_format['font_color'] = font.color.rgb
+                    elif hasattr(font.color, 'theme_color') and font.color.theme_color:
+                        # 处理主题颜色
+                        run_format['font_color'] = 'theme_color'
+            except Exception:
+                pass
+        
+        formatting_data.append(run_format)
+    
+    return formatting_data
+
+
 def parse_word_sections(file_path: str) -> Dict[str, any]:
     """
-    解析Word文档的编号段落
+    解析Word文档的编号段落，保留详细的格式信息
     
     Args:
         file_path (str): Word文档路径
         
     Returns:
-        Dict: 包含分段内容的字典
+        Dict: 包含分段内容和格式信息的字典
     """
     result = {
         'sections': [],
@@ -45,6 +86,9 @@ def parse_word_sections(file_path: str) -> Dict[str, any]:
             if not text:
                 continue
             
+            # 提取格式信息
+            paragraph_formatting = extract_word_formatting(paragraph)
+            
             match = number_pattern.match(text)
             if match:
                 if current_section is not None:
@@ -57,11 +101,13 @@ def parse_word_sections(file_path: str) -> Dict[str, any]:
                     'number': section_number,
                     'title': section_title,
                     'content': [text],
-                    'text_only': section_title
+                    'text_only': section_title,
+                    'formatting': [paragraph_formatting]
                 }
             else:
                 if current_section is not None:
                     current_section['content'].append(text)
+                    current_section['formatting'].append(paragraph_formatting)
                     if current_section['text_only']:
                         current_section['text_only'] += '\n' + text
                     else:
@@ -71,7 +117,8 @@ def parse_word_sections(file_path: str) -> Dict[str, any]:
                         'number': 0,
                         'title': '前言',
                         'content': [text],
-                        'text_only': text
+                        'text_only': text,
+                        'formatting': [paragraph_formatting]
                     }
         
         if current_section is not None:
@@ -191,7 +238,7 @@ def copy_slide_content(source_slide, target_slide):
                     # 处理占位符
                     for target_shape in target_slide.shapes:
                         if (target_shape.is_placeholder and 
-                            hasattr(source_shape, 'placeholder_format') and
+                            hasattr(shape, 'placeholder_format') and
                             hasattr(target_shape, 'placeholder_format') and
                             target_shape.placeholder_format.idx == shape.placeholder_format.idx):
                             
@@ -233,6 +280,8 @@ def copy_slide_content(source_slide, target_slide):
                             pass
             except:
                 continue
+    except Exception:
+        pass
     except Exception:
         pass
 
@@ -353,9 +402,37 @@ def apply_text_formatting(run, paragraph, format_info):
         pass
 
 
-def replace_slide_content(slide, section, template_slide=None):
+def apply_word_formatting_to_run(run, format_info):
     """
-    替换幻灯片内容，优化版本
+    将Word格式信息应用到PowerPoint文本运行
+    """
+    try:
+        if format_info.get('font_name'):
+            run.font.name = format_info['font_name']
+        if format_info.get('font_size'):
+            run.font.size = format_info['font_size']
+        if format_info.get('font_bold') is not None:
+            run.font.bold = format_info['font_bold']
+        if format_info.get('font_italic') is not None:
+            run.font.italic = format_info['font_italic']
+        if format_info.get('font_underline') is not None:
+            run.font.underline = format_info['font_underline']
+        
+        # 应用颜色
+        if format_info.get('font_color'):
+            try:
+                if format_info['font_color'] != 'theme_color':
+                    run.font.color.rgb = format_info['font_color']
+            except Exception:
+                pass
+                
+    except Exception:
+        pass
+
+
+def replace_slide_content_with_formatting(slide, section, template_slide=None):
+    """
+    替换幻灯片内容并保留Word文档的格式
     """
     try:
         # 查找文本框
@@ -385,55 +462,61 @@ def replace_slide_content(slide, section, template_slide=None):
         if not text_shapes:
             return
         
-        # 准备内容
-        if section['number'] == 0:
-            title_text = section['title']
-        else:
-            title_text = f"{section['number']}. {section['title']}"
-        
-        content_lines = section['content']
-        if len(content_lines) > 1:
-            content_text = '\n'.join(content_lines[1:])
-        else:
-            content_text = section['text_only']
-        
-        if not content_text.strip():
-            content_text = title_text
-        
-        # 替换主文本框内容
+        # 主文本框
         main_text_shape = text_shapes[0]
-        original_formats = extract_text_formatting(main_text_shape)
         main_text_shape.text_frame.clear()
         
-        # 设置内容，避免空行
-        if content_text != title_text and content_text.strip():
-            full_text = f"{title_text}\n{content_text}"
-        else:
-            full_text = title_text
-        
-        # 过滤空行并设置文本
-        lines = [line for line in full_text.split('\n') if line.strip()]
-        
-        for i, line in enumerate(lines):
-            if i == 0:
+        # 处理每个段落的格式
+        for content_idx, (content_line, formatting_data) in enumerate(zip(section['content'], section.get('formatting', []))):
+            
+            # 创建段落
+            if content_idx == 0:
                 paragraph = main_text_shape.text_frame.paragraphs[0]
             else:
                 paragraph = main_text_shape.text_frame.add_paragraph()
             
-            run = paragraph.add_run()
-            run.text = line
-            
-            if i == 0:
-                apply_text_formatting(run, paragraph, original_formats.get('title', original_formats.get('default')))
-            else:
-                apply_text_formatting(run, paragraph, original_formats.get('content', original_formats.get('default')))
+            # 为每个格式化的文本片段创建运行
+            for format_info in formatting_data:
+                if format_info['text'].strip():  # 只处理非空文本
+                    run = paragraph.add_run()
+                    run.text = format_info['text']
+                    apply_word_formatting_to_run(run, format_info)
         
         # 清空其他文本框
         for i in range(1, len(text_shapes)):
             text_shapes[i].text = ""
             
-    except Exception:
-        pass
+    except Exception as e:
+        # 如果格式化失败，回退到基本文本设置
+        try:
+            main_text_shape = text_shapes[0] if text_shapes else None
+            if main_text_shape:
+                # 准备基本内容
+                if section['number'] == 0:
+                    title_text = section['title']
+                else:
+                    title_text = f"{section['number']}. {section['title']}"
+                
+                content_lines = section['content']
+                if len(content_lines) > 1:
+                    content_text = '\n'.join(content_lines[1:])
+                else:
+                    content_text = section['text_only']
+                
+                if not content_text.strip():
+                    content_text = title_text
+                
+                # 设置基本文本
+                if content_text != title_text and content_text.strip():
+                    full_text = f"{title_text}\n{content_text}"
+                else:
+                    full_text = title_text
+                
+                # 过滤空行
+                lines = [line for line in full_text.split('\n') if line.strip()]
+                main_text_shape.text = '\n'.join(lines)
+        except:
+            pass
 
 
 def convert_word_to_ppt(word_file_path: str, ppt_file_path: str, output_file: str = None) -> Dict[str, any]:
@@ -498,7 +581,7 @@ def convert_word_to_ppt(word_file_path: str, ppt_file_path: str, output_file: st
                     target_slide = prs.slides.add_slide(template_layout)
                     copy_slide_content(template_slide, target_slide)
                 
-                replace_slide_content(target_slide, section, template_slide)
+                replace_slide_content_with_formatting(target_slide, section, template_slide)
                 slides_created += 1
                 
             except Exception:
